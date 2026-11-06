@@ -1,0 +1,8 @@
+{"id":"C-001","kind":"complaint","text":"Customer of Bank A paid a mobile recharge through Gateway X using the UPI product and was debited twice. Failure reported: duplicate debit. Contact me at jane.doe@example.com."}
+{"id":"C-002","kind":"complaint","text":"Customer of Bank A made a UPI payment via Gateway X and was charged two times. Failure reported: duplicate debit."}
+{"id":"C-003","kind":"complaint","text":"Customer of Bank B paid by card via Gateway X and saw a double debit. Failure reported: duplicate debit. Call me on +91 98765 43210."}
+{"id":"C-004","kind":"complaint","text":"Customer of Bank C used the Credit Card product via Gateway Y and the payment was refused. Failure reported: declined transaction."}
+{"id":"C-005","kind":"complaint","text":"Customer of Bank A paid a bill via Gateway X using UPI and was debited twice. Failure reported: duplicate debit."}
+{"id":"ENG-1","kind":"engineering","text":"Duplicate debit is caused by callback timeout. Callback timeout affects Gateway X."}
+{"id":"ENG-2","kind":"engineering","text":"Gateway X was changed in Release 4.2, which modified its retry logic. Release 4.2 was deployed on Gateway X."}
+{"id":"ENG-3","kind":"engineering","text":"Declined transaction affects Gateway Y. It is unrelated to any recent release."}

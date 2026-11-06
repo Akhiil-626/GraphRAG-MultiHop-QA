@@ -1,0 +1,8 @@
+neo4j>=5.20
+ollama>=0.3
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.0
+python-dotenv>=1.0
+numpy>=1.26
+pytest>=8.0
