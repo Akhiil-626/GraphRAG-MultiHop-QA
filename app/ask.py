@@ -10,4 +10,10 @@ if __name__ == "__main__":
     print("\nEDGES USED:")
     for f in r["facts"]:
         print(f"  {f['s']} -[{f['rel']}]-> {f['o']}  {f['chunks']}")
+    if "citations" in r:
+        c = r["citations"]
+        print(f"\nCITATIONS (membership valid: {c['membership_valid']}):")
+        print(f"  Valid: {c['valid_chunk_ids']}")
+        if c["unsupported_chunk_ids"]:
+            print(f"  Unsupported: {c['unsupported_chunk_ids']}")
     store.close()

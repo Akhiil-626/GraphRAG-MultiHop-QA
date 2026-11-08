@@ -81,8 +81,10 @@ class GraphStore:
             keys=keys, limit=limit)
 
     def chunk_texts(self, ids: list[str]) -> list[dict]:
-        return self.run("MATCH (c:Chunk) WHERE c.id IN $ids "
+        rows = self.run("MATCH (c:Chunk) WHERE c.id IN $ids "
                         "RETURN c.id AS id, c.text AS text", ids=ids)
+        row_map = {r["id"]: r for r in rows}
+        return [row_map[cid] for cid in ids if cid in row_map]
 
     def shared_gateway_report(self) -> list[dict]:
         return self.run("""

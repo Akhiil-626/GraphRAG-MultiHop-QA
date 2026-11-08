@@ -9,7 +9,7 @@ store = GraphStore()
 
 class Ask(BaseModel):
     question: str
-    hops: int = 2
+    hops: int = 3
 
 
 @app.get("/health")
@@ -20,7 +20,12 @@ def health():
 @app.post("/ask")
 def ask(body: Ask):
     r = qa.answer(store, body.question, hops=body.hops)
-    return {"answer": r["answer"], "edges": r["facts"], "chunks": r["chunks"]}
+    return {
+        "answer": r["answer"],
+        "edges": r["facts"],
+        "chunks": r["chunks"],
+        "citations": r.get("citations"),
+    }
 
 
 @app.get("/report/shared-gateways")
