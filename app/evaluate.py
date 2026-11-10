@@ -10,6 +10,7 @@ from collections import Counter
 from app import qa, llm
 from app.graph_store import GraphStore
 from app.retrieve import retrieve
+from app.schema import RELATIONS
 
 
 def norm(s: str) -> str:
@@ -80,12 +81,16 @@ def hit_rate_at_k(retrieved: list[str], gold: list[str], k: int | None = None) -
 
 
 def connected_path_exists(facts: list[dict], source: str, target: str,
-                          directed: bool = False) -> tuple[bool, list[str]]:
-    """Determine if a continuous path exists between source and target in retrieved facts using BFS.
+                          directed: bool = False, validate_schema: bool = True,
+                          allowed_relations: set[str] | list[str] | None = None) -> tuple[bool, list[str]]:
+    """Determine if a continuous valid path exists between source and target in retrieved facts using BFS.
 
     - Normalizes entity names case-insensitively.
     - If directed=False (default): explores edges bidirectionally (reflecting graph expansion).
     - If directed=True: explores only outgoing edges (startNode -> endNode).
+    - If validate_schema=True (default): validates that each edge uses an ontology relationship
+      and conforms to allowed endpoint types (s_type and o_type when present).
+    - If allowed_relations is specified: restricts traversal to that subset of relations.
     Returns:
         (path_found: bool, path: list[str])
     """
@@ -96,14 +101,32 @@ def connected_path_exists(facts: list[dict], source: str, target: str,
     if src == tgt:
         return True, [src]
 
+    allowed_rel_set = set(allowed_relations) if allowed_relations is not None else None
+
     adj = collections.defaultdict(list)
     for f in facts:
+        rel = f.get("rel")
+        if validate_schema:
+            if not rel or rel not in RELATIONS:
+                continue
+            if allowed_rel_set is not None and rel not in allowed_rel_set:
+                continue
+            s_type = f.get("s_type")
+            o_type = f.get("o_type")
+            allowed_src, allowed_tgt = RELATIONS[rel]
+            if s_type and s_type not in allowed_src:
+                continue
+            if o_type and o_type not in allowed_tgt:
+                continue
+
         u = norm(f.get("s", ""))
         v = norm(f.get("o", ""))
-        if u and v:
-            adj[u].append(v)
-            if not directed:
-                adj[v].append(u)
+        if not u or not v or u == v:
+            continue
+
+        adj[u].append(v)
+        if not directed:
+            adj[v].append(u)
 
     queue = collections.deque([[src]])
     visited = {src}

@@ -91,16 +91,74 @@ def test_connected_path_exists_disconnected():
 
 
 def test_connected_path_exists_directed_vs_undirected():
-    # Edge points from B to A
-    facts = [{"s": "Node B", "rel": "POINTS_TO", "o": "Node A"}]
+    # Edge points from Release 4.2 to Gateway X (DEPLOYED_ON)
+    facts = [{"s": "Release 4.2", "rel": "DEPLOYED_ON", "o": "Gateway X"}]
 
-    # Undirected can traverse from A to B
-    conn_undir, _ = connected_path_exists(facts, "Node A", "Node B", directed=False)
+    # Undirected can traverse from Gateway X to Release 4.2
+    conn_undir, _ = connected_path_exists(facts, "Gateway X", "Release 4.2", directed=False)
     assert conn_undir is True
 
-    # Directed cannot traverse from A to B (edge is B -> A)
-    conn_dir, _ = connected_path_exists(facts, "Node A", "Node B", directed=True)
+    # Directed cannot traverse from Gateway X to Release 4.2 (edge is Release 4.2 -> Gateway X)
+    conn_dir, _ = connected_path_exists(facts, "Gateway X", "Release 4.2", directed=True)
     assert conn_dir is False
+
+
+def test_connected_path_rejects_eng1_invalid_endpoint_anomaly():
+    """Regression test: verify ENG-1 anomaly where Failure is used with DEPLOYED_ON is rejected."""
+    # Corrupted ENG-1 fact: callback timeout (Failure) DEPLOYED_ON Gateway X
+    bad_facts = [
+        {"s": "callback timeout", "s_type": "Failure", "rel": "DEPLOYED_ON", "o": "Gateway X", "o_type": "Gateway"}
+    ]
+    connected, path = connected_path_exists(bad_facts, "callback timeout", "Gateway X")
+    assert connected is False
+    assert path == []
+
+    # Valid ENG-1 fact: callback timeout (Failure) AFFECTS Gateway X (Gateway)
+    good_facts = [
+        {"s": "callback timeout", "s_type": "Failure", "rel": "AFFECTS", "o": "Gateway X", "o_type": "Gateway"}
+    ]
+    connected, path = connected_path_exists(good_facts, "callback timeout", "Gateway X")
+    assert connected is True
+    assert path == ["callback timeout", "gateway x"]
+
+
+def test_connected_path_rejects_eng3_self_loop_anomaly():
+    """Regression test: verify ENG-3 pseudo-self-loop anomaly is rejected and does not bridge path."""
+    bad_facts = [
+        {"s": "Gateway Y", "s_type": "Failure", "rel": "AFFECTS", "o": "Gateway Y", "o_type": "Gateway"}
+    ]
+    # Same name s == o cannot form an edge between distinct entities
+    connected, path = connected_path_exists(bad_facts, "declined transaction", "Gateway Y")
+    assert connected is False
+    assert path == []
+
+
+def test_connected_path_rejects_invalid_relation_type():
+    """Verify unknown relationship types are rejected when validate_schema=True."""
+    facts = [
+        {"s": "Gateway X", "rel": "FABRICATED_RELATION", "o": "Release 4.2"}
+    ]
+    connected, _ = connected_path_exists(facts, "Gateway X", "Release 4.2")
+    assert connected is False
+
+    # When validate_schema=False, unvalidated graph search is permitted
+    connected_unval, _ = connected_path_exists(facts, "Gateway X", "Release 4.2", validate_schema=False)
+    assert connected_unval is True
+
+
+def test_connected_path_allowed_relations_filtering():
+    """Verify allowed_relations restricts traversal to approved relations."""
+    facts = [
+        {"s": "duplicate debit", "rel": "CAUSED_BY", "o": "callback timeout"},
+        {"s": "callback timeout", "rel": "AFFECTS", "o": "Gateway X"},
+    ]
+    # Path exists with all relations
+    connected, path = connected_path_exists(facts, "duplicate debit", "Gateway X")
+    assert connected is True
+
+    # Path rejected if AFFECTS is excluded from allowed_relations
+    connected, path = connected_path_exists(facts, "duplicate debit", "Gateway X", allowed_relations={"CAUSED_BY"})
+    assert connected is False
 
 
 def test_citation_membership_integration():

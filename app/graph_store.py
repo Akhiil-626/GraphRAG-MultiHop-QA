@@ -1,6 +1,6 @@
 from neo4j import GraphDatabase
 from app import config, llm
-from app.schema import RELATIONS
+from app.schema import RELATIONS, is_valid
 
 
 class GraphStore:
@@ -34,9 +34,10 @@ class GraphStore:
                  id=cid, t=text, v=llm.embed([text])[0])
 
     def add_triple(self, t: dict, chunk_id: str):
+        """Validate triple against schema before executing any database writes."""
+        if not is_valid(t):
+            raise ValueError(f"Invalid triple for storage: {t}")
         rel = t["r"]
-        if rel not in RELATIONS:  # relation is interpolated into Cypher: whitelist only
-            raise ValueError(f"invalid relation {rel}")
         self.run(
             f"""MERGE (a:Entity {{key:$ak}}) ON CREATE SET a.name=$an, a.type=$at
                 MERGE (b:Entity {{key:$bk}}) ON CREATE SET b.name=$bn, b.type=$bt
@@ -49,12 +50,18 @@ class GraphStore:
             ak=f"{t['s_type']}:{t['s']}", an=t["s"], at=t["s_type"],
             bk=f"{t['o_type']}:{t['o']}", bn=t["o"], bt=t["o_type"], cid=chunk_id)
 
-    def embed_entities(self):
+    def embed_entities(self, typed: bool = False):
+        """Embed un-embedded entities. Supports optional type-aware embedding (f'{type} {name}').
+
+        Note: Defaults to typed=False for backward compatibility with existing stored vectors.
+        Do not change to typed=True without executing the full database re-embedding migration.
+        """
         rows = self.run("MATCH (e:Entity) WHERE e.embedding IS NULL "
-                        "RETURN e.key AS key, e.name AS name")
+                        "RETURN e.key AS key, e.name AS name, e.type AS type")
         if not rows:
             return
-        for r, v in zip(rows, llm.embed([r["name"] for r in rows])):
+        texts = [f"{r['type']} {r['name']}" if typed else r["name"] for r in rows]
+        for r, v in zip(rows, llm.embed(texts)):
             self.run("MATCH (e:Entity {key:$k}) "
                      "CALL db.create.setNodeVectorProperty(e,'embedding',$v)",
                      k=r["key"], v=v)
@@ -76,8 +83,10 @@ class GraphStore:
                 MATCH p=(s)-[*1..{hops}]-(:Entity)
                 WHERE all(n IN nodes(p) WHERE n:Entity)
                 UNWIND relationships(p) AS r WITH DISTINCT r
-                RETURN startNode(r).name AS s, type(r) AS rel,
-                       endNode(r).name AS o, r.chunks AS chunks LIMIT $limit""",
+                RETURN startNode(r).name AS s, startNode(r).type AS s_type,
+                       type(r) AS rel,
+                       endNode(r).name AS o, endNode(r).type AS o_type,
+                       r.chunks AS chunks LIMIT $limit""",
             keys=keys, limit=limit)
 
     def chunk_texts(self, ids: list[str]) -> list[dict]:
