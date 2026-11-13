@@ -76,6 +76,16 @@ def test_expand_projects_typed_graph_facts():
     assert "endNode(r).type AS o_type" in query_text
 
 
+def test_expand_deterministic_ordering_cypher():
+    """Verify GraphStore.expand Cypher includes deterministic ORDER BY on fact fields before LIMIT."""
+    store = GraphStore.__new__(GraphStore)
+    store.run = MagicMock(return_value=[])
+
+    store.expand(["Failure:duplicate debit"], hops=2, limit=60)
+    query_text = store.run.call_args[0][0]
+    assert "ORDER BY s_type, s, rel, o_type, o LIMIT $limit" in query_text
+
+
 def test_embed_entities_typed_mode():
     """Verify GraphStore.embed_entities formats type-aware text when typed=True."""
     store = GraphStore.__new__(GraphStore)

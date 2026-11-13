@@ -12,7 +12,8 @@ GRAPH_PROMPT = """Answer the question using ONLY the provided evidence. Follow t
 6. Do not contradict evidence. If a source explicitly identifies a release or gateway, state it directly rather than claiming it is unspecified.
 7. Treat GRAPH FACTS as structural pathways and hypotheses of co-occurrence, not definitive proof of causation. Multi-hop connections must be framed as hypotheses unless the source text explicitly asserts a direct causal link. Distinguish explicit evidence from hypotheses; do not present a possible explanation as an established root cause.
 8. If evidence does not establish the complete answer, state exactly what is known and what remains uncertain or unverified.
-9. Format your response using this exact structure:
+9. When answering multi-hop questions, combine complementary facts across retrieved chunks to trace the full causal or relational path. Do not stop at an intermediate entity or mechanism when the question asks for the broader cause or related release; connect it to any subsequent release or change identified in the evidence, citing each factual claim with its supplied chunk ID in square brackets.
+10. Format your response using this exact structure:
 Answer: <direct answer citing source chunk IDs in square brackets, e.g. [ENG-1-0]>
 Evidence: <one or more exact chunk IDs from the provided evidence, e.g. [ENG-1-0]>
 

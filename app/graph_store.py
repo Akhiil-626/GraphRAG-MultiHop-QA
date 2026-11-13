@@ -86,7 +86,8 @@ class GraphStore:
                 RETURN startNode(r).name AS s, startNode(r).type AS s_type,
                        type(r) AS rel,
                        endNode(r).name AS o, endNode(r).type AS o_type,
-                       r.chunks AS chunks LIMIT $limit""",
+                       r.chunks AS chunks
+                ORDER BY s_type, s, rel, o_type, o LIMIT $limit""",
             keys=keys, limit=limit)
 
     def chunk_texts(self, ids: list[str]) -> list[dict]:
