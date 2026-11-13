@@ -47,6 +47,122 @@ def test_evidence_ordering_preserves_vector_and_graph_order():
     assert res["vector_chunk_ids"] == ["V1", "SHARED", "V2"]
 
 
+def test_retrieve_ranks_graph_chunks_by_fact_support_count():
+    """Verify that graph chunks supported by more distinct facts rank higher."""
+    mock_store = MagicMock()
+    mock_store.seed_entities.return_value = ["Entity:a"]
+    # Fact 1 supports G_LOW and G_HIGH
+    # Fact 2 supports G_MID and G_HIGH
+    # Fact 3 supports G_HIGH
+    # Total distinct facts:
+    # G_HIGH: 3 facts
+    # G_LOW: 1 fact (seen first)
+    # G_MID: 1 fact (seen second)
+    mock_store.expand.return_value = [
+        {"s": "a", "s_type": "Failure", "rel": "AFFECTS", "o": "b", "o_type": "Gateway", "chunks": ["G_LOW", "G_HIGH"]},
+        {"s": "b", "s_type": "Gateway", "rel": "CHANGED_IN", "o": "c", "o_type": "Release", "chunks": ["G_MID", "G_HIGH"]},
+        {"s": "c", "s_type": "Release", "rel": "DEPLOYED_ON", "o": "d", "o_type": "Gateway", "chunks": ["G_HIGH"]},
+    ]
+    mock_store.similar_chunks.return_value = []
+    mock_store.chunk_texts.side_effect = lambda ids: [{"id": cid, "text": f"Text for {cid}"} for cid in ids]
+
+    res = retrieve(mock_store, "test question")
+
+    # G_HIGH has 3 facts, G_MID has 1 (release), G_LOW has 1 (causal)
+    # G_HIGH ranks first (higher support count), and G_MID ranks before G_LOW (release before causal)
+    assert res["graph_chunk_ids"] == ["G_HIGH", "G_MID", "G_LOW"]
+    retrieved_ids = [c["id"] for c in res["chunks"]]
+    assert retrieved_ids == ["G_HIGH", "G_MID", "G_LOW"]
+
+
+def test_retrieve_orders_release_before_causal_engineering_evidence():
+    """Verify that when both release and causal engineering chunks are retrieved,
+
+    release/change evidence is ordered before causal engineering evidence,
+    and complaint context precedes them.
+    """
+    mock_store = MagicMock()
+    mock_store.seed_entities.return_value = ["Entity:a"]
+    # Mock graph facts containing:
+    # 1. Complaint chunk C_CHUNK
+    # 2. Causal engineering chunk CAUSAL_CHUNK (Failure AFFECTS Gateway, Failure CAUSED_BY Failure)
+    # 3. Release engineering chunk RELEASE_CHUNK (Gateway CHANGED_IN Release, Release DEPLOYED_ON Gateway)
+    # Both engineering chunks have identical support count (2 facts each)
+    mock_store.expand.return_value = [
+        {"s": "c-1", "s_type": "Complaint", "rel": "AGAINST", "o": "bank", "o_type": "Bank", "chunks": ["C_CHUNK"]},
+        {"s": "c-1", "s_type": "Complaint", "rel": "VIA", "o": "gateway", "o_type": "Gateway", "chunks": ["C_CHUNK"]},
+        {"s": "failure", "s_type": "Failure", "rel": "AFFECTS", "o": "gateway", "o_type": "Gateway", "chunks": ["CAUSAL_CHUNK"]},
+        {"s": "failure2", "s_type": "Failure", "rel": "CAUSED_BY", "o": "failure", "o_type": "Failure", "chunks": ["CAUSAL_CHUNK"]},
+        {"s": "gateway", "s_type": "Gateway", "rel": "CHANGED_IN", "o": "release", "o_type": "Release", "chunks": ["RELEASE_CHUNK"]},
+        {"s": "release", "s_type": "Release", "rel": "DEPLOYED_ON", "o": "gateway", "o_type": "Gateway", "chunks": ["RELEASE_CHUNK"]},
+    ]
+    mock_store.similar_chunks.return_value = []
+    mock_store.chunk_texts.side_effect = lambda ids: [{"id": cid, "text": f"Text for {cid}"} for cid in ids]
+
+    res = retrieve(mock_store, "test question")
+
+    # Expected order:
+    # 1. Complaint context (C_CHUNK)
+    # 2. Release/change evidence (RELEASE_CHUNK) before causal evidence (CAUSAL_CHUNK)
+    expected_ids = ["C_CHUNK", "RELEASE_CHUNK", "CAUSAL_CHUNK"]
+    assert res["graph_chunk_ids"] == expected_ids
+    assert [c["id"] for c in res["chunks"]] == expected_ids
+
+
+def test_retrieve_breaks_ties_by_first_seen_order():
+    """Verify that graph chunks with equal fact support break ties by their original first-seen order."""
+    mock_store = MagicMock()
+    mock_store.seed_entities.return_value = ["Entity:a"]
+    # All chunks have support count = 1
+    mock_store.expand.return_value = [
+        {"s": "a", "rel": "REL1", "o": "b", "chunks": ["G_FIRST", "G_SECOND"]},
+        {"s": "b", "rel": "REL2", "o": "c", "chunks": ["G_THIRD"]},
+    ]
+    mock_store.similar_chunks.return_value = []
+    mock_store.chunk_texts.side_effect = lambda ids: [{"id": cid, "text": f"Text for {cid}"} for cid in ids]
+
+    res = retrieve(mock_store, "test question")
+
+    assert res["graph_chunk_ids"] == ["G_FIRST", "G_SECOND", "G_THIRD"]
+    retrieved_ids = [c["id"] for c in res["chunks"]]
+    assert retrieved_ids == ["G_FIRST", "G_SECOND", "G_THIRD"]
+
+
+def test_retrieve_preserves_vector_ranking_and_shared_evidence_priority():
+    """Verify vector ranking and shared-evidence priority remain unchanged while graph chunks rank by support count."""
+    mock_store = MagicMock()
+    mock_store.seed_entities.return_value = ["Entity:a"]
+    # Graph facts:
+    # SHARED_2: 1 fact
+    # SHARED_1: 2 facts
+    # G_POPULAR: 3 facts
+    # G_RARE: 1 fact
+    mock_store.expand.return_value = [
+        {"s": "a", "rel": "REL1", "o": "b", "chunks": ["SHARED_2", "SHARED_1", "G_POPULAR"]},
+        {"s": "b", "rel": "REL2", "o": "c", "chunks": ["SHARED_1", "G_POPULAR"]},
+        {"s": "c", "rel": "REL3", "o": "d", "chunks": ["G_POPULAR", "G_RARE"]},
+    ]
+    # Vector ranking: V_TOP, SHARED_2, SHARED_1, V_BOTTOM
+    mock_store.similar_chunks.return_value = [
+        {"id": "V_TOP", "text": "Vector top"},
+        {"id": "SHARED_2", "text": "Shared 2"},
+        {"id": "SHARED_1", "text": "Shared 1"},
+        {"id": "V_BOTTOM", "text": "Vector bottom"},
+    ]
+    mock_store.chunk_texts.side_effect = lambda ids: [{"id": cid, "text": f"Text for {cid}"} for cid in ids]
+
+    res = retrieve(mock_store, "test question", max_chunks=10)
+
+    # 1. Shared chunks first, in vector rank order: SHARED_2, SHARED_1
+    # 2. Vector-only chunks second, in vector rank order: V_TOP, V_BOTTOM
+    # 3. Graph-only chunks third, in fact support count order: G_POPULAR, G_RARE
+    expected_ids = ["SHARED_2", "SHARED_1", "V_TOP", "V_BOTTOM", "G_POPULAR", "G_RARE"]
+    retrieved_ids = [c["id"] for c in res["chunks"]]
+    assert retrieved_ids == expected_ids
+    assert res["graph_chunk_ids"] == ["G_POPULAR", "SHARED_1", "SHARED_2", "G_RARE"]
+    assert res["vector_chunk_ids"] == ["V_TOP", "SHARED_2", "SHARED_1", "V_BOTTOM"]
+
+
 def test_citation_validation_valid():
     """Verify citation validation passes when all citations belong to supplied chunks."""
     text = "Gateway X was modified in [ENG-2-0] following duplicate debits reported in [C-001-0]."
