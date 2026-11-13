@@ -70,6 +70,34 @@ def test_citation_validation_unsupported():
     assert result["unsupported_chunk_ids"] == ["FABRICATED-1-0"]
 
 
+def test_citation_validation_unretrieved_real_chunk_ids():
+    """Verify citation validation flags real-format chunk IDs that were not in supplied chunks."""
+    text = "The issue is described in [C-001-0] and further detailed in [C-002-0]."
+    supplied = ["C-001-0", "ENG-1-0"]  # C-002-0 has valid syntax but was not retrieved/supplied
+    result = validate_citations(text, supplied)
+    assert result["membership_valid"] is False
+    assert result["cited_chunk_ids"] == ["C-001-0", "C-002-0"]
+    assert result["valid_chunk_ids"] == ["C-001-0"]
+    assert result["unsupported_chunk_ids"] == ["C-002-0"]
+
+
+def test_citation_validation_ignores_relationship_labels():
+    """Graph relationship labels must not be treated as chunk citations."""
+    text = (
+        "The graph shows callback timeout [AFFECTS] gateway x, "
+        "and another path [VIA] gateway x [REPORTS]. "
+        "The supporting evidence is [ENG-1-0]."
+    )
+    supplied = ["ENG-1-0"]
+
+    result = validate_citations(text, supplied)
+
+    assert result["membership_valid"] is True
+    assert result["cited_chunk_ids"] == ["ENG-1-0"]
+    assert result["valid_chunk_ids"] == ["ENG-1-0"]
+    assert result["unsupported_chunk_ids"] == []
+
+
 def test_citation_validation_no_citations():
     """Verify answers with zero citations are marked as not membership-valid."""
     text = "There is no evidence available to answer."
@@ -87,6 +115,8 @@ def test_graph_prompt_is_generic_and_guards_hypotheses():
     assert "hypothes" in GRAPH_PROMPT.lower()
     assert "proven causation" in GRAPH_PROMPT.lower() or "definitive proof" in GRAPH_PROMPT.lower()
     assert "source chunks" in GRAPH_PROMPT.lower()
+    assert "first sentence" in GRAPH_PROMPT.lower()
+    assert "square brackets" in GRAPH_PROMPT.lower()
 
     # Must be generic: no benchmark-specific entities hardcoded in prompt template
     assert "bank a" not in GRAPH_PROMPT.lower()
@@ -112,3 +142,33 @@ def test_baseline_answer_compatibility():
     sig = inspect.signature(baseline_answer)
     assert "k" in sig.parameters
     assert sig.parameters["k"].default == 5
+
+
+def test_qa_answer_retries_when_citations_missing(monkeypatch):
+    """Verify that qa.answer triggers a retry when initial answer lacks citations."""
+    mock_store = MagicMock()
+    mock_store.seed_entities.return_value = ["Entity:a"]
+    mock_store.expand.return_value = [{"s": "a", "rel": "REL", "o": "b", "chunks": ["ENG-1-0"]}]
+    mock_store.similar_chunks.return_value = [{"id": "ENG-1-0", "text": "Gateway Alpha retry logic changed"}]
+    mock_store.chunk_texts.return_value = [{"id": "ENG-1-0", "text": "Gateway Alpha retry logic changed"}]
+
+    responses = [
+        "Gateway Alpha was updated in the latest release.",  # No citations
+        "Answer: Gateway Alpha was updated [ENG-1-0].\nEvidence: [ENG-1-0]",  # Valid citation
+    ]
+    chat_calls = []
+
+    def mock_chat(prompt):
+        chat_calls.append(prompt)
+        return responses[len(chat_calls) - 1]
+
+    from app import llm, qa
+    monkeypatch.setattr(llm, "chat", mock_chat)
+
+    res = qa.answer(mock_store, "What happened to Gateway Alpha?")
+
+    assert len(chat_calls) == 2
+    assert "Your previous response did not include required chunk citations" in chat_calls[1]
+    assert res["citations"]["membership_valid"] is True
+    assert res["citations"]["valid_chunk_ids"] == ["ENG-1-0"]
+    assert res["answer"] == responses[1]

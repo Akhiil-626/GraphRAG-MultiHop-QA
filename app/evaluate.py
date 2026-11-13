@@ -191,11 +191,19 @@ def evaluate_single(store: GraphStore, item: dict, hops: int = 3, k_baseline: in
                           for f in r["facts"])
     chunks_str = "\n".join(f"[{c['id']}] {c['text']}" for c in r["chunks"])
     raw_answer = llm.chat(qa.GRAPH_PROMPT.format(facts=facts_str, chunks=chunks_str, q=q))
-    generation_ms = (time.perf_counter() - t_gen_start) * 1000
-    total_ms = retrieval_ms + generation_ms
-
     supplied_chunk_ids = [c["id"] for c in r["chunks"]]
     citations = qa.validate_citations(raw_answer, supplied_chunk_ids)
+
+    if not citations["membership_valid"] and supplied_chunk_ids:
+        retry_prompt = qa.CITATION_REPAIR_PROMPT.format(q=q, chunks=chunks_str)
+        retry_answer = llm.chat(retry_prompt)
+        retry_citations = qa.validate_citations(retry_answer, supplied_chunk_ids)
+        if retry_citations["membership_valid"]:
+            raw_answer = retry_answer
+            citations = retry_citations
+
+    generation_ms = (time.perf_counter() - t_gen_start) * 1000
+    total_ms = retrieval_ms + generation_ms
 
     # Retrieval metrics for hybrid
     k_retrieved = len(supplied_chunk_ids)
@@ -373,7 +381,7 @@ def run(path: str = "data/eval_questions.jsonl", output_dir: str = "artifacts",
             "hops": hops,
             "k_baseline": k_baseline,
             "precision_k_denominator": "k_budget (fixed budget slots)",
-            "citation_validation_type": "chunk_id_membership (syntactic presence only)"
+            "citation_validation_type": "chunk_id_format_and_membership (syntactic presence only)"
         },
         "aggregate": agg,
         "questions": per_question_results
