@@ -1,7 +1,8 @@
 from app.evaluate import (
     contains, f1, path_hit,
     recall_at_k, precision_at_k, hit_rate_at_k,
-    connected_path_exists, assess_hypothesis_calibration, norm
+    connected_path_exists, assess_hypothesis_calibration, norm,
+    expected_evidence_coverage, citation_relevance_precision, evaluate_evidence_grounding
 )
 from app.qa import validate_citations
 
@@ -193,3 +194,113 @@ def test_assess_hypothesis_calibration():
     )
     res_uncal = assess_hypothesis_calibration(uncalibrated_ans)
     assert res_uncal["is_calibrated"] is False
+
+
+def test_evidence_grounding_complete_support():
+    """Verify metrics when an answer cites all expected chunks and all cited chunks are relevant."""
+    expected = ["ENG-1-0", "ENG-2-0"]
+    relevant = ["ENG-1-0", "ENG-2-0", "C-001-0"]
+    cited = ["ENG-1-0", "ENG-2-0"]
+
+    assert expected_evidence_coverage(cited, expected) == 1.0
+    assert citation_relevance_precision(cited, relevant) == 1.0
+
+    grounding = evaluate_evidence_grounding(cited, expected, relevant, membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert grounding["membership_valid"] is True
+    assert set(grounding["covered_expected_chunks"]) == {"ENG-1-0", "ENG-2-0"}
+    assert grounding["uncovered_expected_chunks"] == []
+    assert set(grounding["relevant_cited_chunks"]) == {"ENG-1-0", "ENG-2-0"}
+    assert grounding["irrelevant_cited_chunks"] == []
+
+
+def test_evidence_grounding_missing_support():
+    """Verify metrics when an answer misses some or all expected supporting chunks."""
+    expected = ["ENG-1-0", "ENG-2-0"]
+    relevant = ["ENG-1-0", "ENG-2-0"]
+
+    # Partial missing support: cited only 1 of 2 expected
+    partial_cited = ["ENG-1-0"]
+    assert expected_evidence_coverage(partial_cited, expected) == 0.5
+    assert citation_relevance_precision(partial_cited, relevant) == 1.0
+
+    partial_grounding = evaluate_evidence_grounding(partial_cited, expected, relevant)
+    assert partial_grounding["expected_coverage"] == 0.5
+    assert partial_grounding["uncovered_expected_chunks"] == ["ENG-2-0"]
+
+    # Complete missing support: cited chunks don't include any expected chunks
+    zero_cited = ["C-001-0"]
+    assert expected_evidence_coverage(zero_cited, expected) == 0.0
+    zero_grounding = evaluate_evidence_grounding(zero_cited, expected, relevant)
+    assert zero_grounding["expected_coverage"] == 0.0
+    assert set(zero_grounding["uncovered_expected_chunks"]) == {"ENG-1-0", "ENG-2-0"}
+
+
+def test_evidence_grounding_irrelevant_citations():
+    """Verify metrics when an answer cites irrelevant chunks alongside expected chunks."""
+    expected = ["ENG-1-0"]
+    relevant = ["ENG-1-0"]
+    # C-004-0 is an unrelated bank/failure chunk not in relevant evidence
+    cited = ["ENG-1-0", "C-004-0"]
+
+    assert expected_evidence_coverage(cited, expected) == 1.0
+    assert citation_relevance_precision(cited, relevant) == 0.5
+
+    grounding = evaluate_evidence_grounding(cited, expected, relevant, membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 0.5
+    assert grounding["irrelevant_cited_chunks"] == ["C-004-0"]
+    assert grounding["relevant_cited_chunks"] == ["ENG-1-0"]
+
+
+def test_evidence_grounding_invalid_citations():
+    """Verify metrics and membership validity when cited IDs are fabricated or invalid."""
+    expected = ["ENG-1-0"]
+    relevant = ["ENG-1-0"]
+    supplied = ["ENG-1-0", "ENG-2-0"]
+
+    answer_text = "The issue was identified in [ENG-1-0] and [FABRICATED-9-9]."
+    citations = validate_citations(answer_text, supplied)
+    assert citations["membership_valid"] is False
+
+    grounding = evaluate_evidence_grounding(
+        citations["cited_chunk_ids"],
+        expected,
+        relevant,
+        membership_valid=citations["membership_valid"]
+    )
+    # ENG-1-0 was cited, covering expected evidence
+    assert grounding["expected_coverage"] == 1.0
+    # FABRICATED-9-9 is not relevant, so 1 of 2 cited chunks is relevant
+    assert grounding["relevance_precision"] == 0.5
+    # Membership validity is preserved as a distinct metric
+    assert grounding["membership_valid"] is False
+    assert grounding["irrelevant_cited_chunks"] == ["FABRICATED-9-9"]
+
+
+def test_evidence_grounding_empty_and_missing_edge_cases():
+    """Verify safe handling of empty citations, empty expected evidence, and empty relevant evidence."""
+    # Empty citations
+    assert expected_evidence_coverage([], ["ENG-1-0"]) == 0.0
+    assert citation_relevance_precision([], ["ENG-1-0"]) == 0.0
+    g_empty = evaluate_evidence_grounding([], ["ENG-1-0"], ["ENG-1-0"])
+    assert g_empty["expected_coverage"] == 0.0
+    assert g_empty["relevance_precision"] == 0.0
+    assert g_empty["covered_expected_chunks"] == []
+    assert g_empty["uncovered_expected_chunks"] == ["ENG-1-0"]
+
+    # Missing / empty expected evidence
+    assert expected_evidence_coverage(["ENG-1-0"], []) == 0.0
+    assert expected_evidence_coverage(["ENG-1-0"], None) == 0.0
+
+    # Missing / empty relevant evidence
+    assert citation_relevance_precision(["ENG-1-0"], []) == 0.0
+    assert citation_relevance_precision(["ENG-1-0"], None) == 0.0
+
+    # Both empty
+    assert expected_evidence_coverage([], []) == 0.0
+    assert citation_relevance_precision([], []) == 0.0
+    assert expected_evidence_coverage(None, None) == 0.0
+    assert citation_relevance_precision(None, None) == 0.0
+

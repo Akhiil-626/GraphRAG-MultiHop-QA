@@ -170,6 +170,65 @@ def assess_hypothesis_calibration(answer_text: str) -> dict:
     }
 
 
+def expected_evidence_coverage(cited_chunk_ids: list[str] | set[str] | None,
+                               expected_chunk_ids: list[str] | set[str] | None) -> float:
+    """Calculate expected evidence coverage: proportion of expected supporting chunks cited.
+
+    Denominator: len(set(expected_chunk_ids)).
+    Returns 0.0 if expected_chunk_ids or cited_chunk_ids is empty.
+    """
+    exp_set = set(expected_chunk_ids) if expected_chunk_ids else set()
+    if not exp_set:
+        return 0.0
+    cited_set = set(cited_chunk_ids) if cited_chunk_ids else set()
+    hits = len(cited_set & exp_set)
+    return hits / len(exp_set)
+
+
+def citation_relevance_precision(cited_chunk_ids: list[str] | set[str] | None,
+                                 relevant_chunk_ids: list[str] | set[str] | None) -> float:
+    """Calculate citation relevance precision: proportion of cited chunks annotated as relevant.
+
+    Denominator: len(set(cited_chunk_ids)).
+    Returns 0.0 if cited_chunk_ids is empty.
+    """
+    cited_set = set(cited_chunk_ids) if cited_chunk_ids else set()
+    if not cited_set:
+        return 0.0
+    rel_set = set(relevant_chunk_ids) if relevant_chunk_ids else set()
+    hits = len(cited_set & rel_set)
+    return hits / len(cited_set)
+
+
+def evaluate_evidence_grounding(
+    cited_chunk_ids: list[str] | set[str] | None,
+    expected_chunk_ids: list[str] | set[str] | None,
+    relevant_chunk_ids: list[str] | set[str] | None,
+    membership_valid: bool | None = None
+) -> dict:
+    """Evaluate grounding quality of citations against expected and relevant evidence annotations."""
+    cited = list(dict.fromkeys(cited_chunk_ids)) if cited_chunk_ids else []
+    expected = list(dict.fromkeys(expected_chunk_ids)) if expected_chunk_ids else []
+    relevant = list(dict.fromkeys(relevant_chunk_ids)) if relevant_chunk_ids else []
+
+    cov = expected_evidence_coverage(cited, expected)
+    prec = citation_relevance_precision(cited, relevant)
+
+    result = {
+        "expected_coverage": round(cov, 4),
+        "relevance_precision": round(prec, 4),
+        "expected_chunks": expected,
+        "relevant_chunks": relevant,
+        "covered_expected_chunks": [cid for cid in expected if cid in set(cited)],
+        "uncovered_expected_chunks": [cid for cid in expected if cid not in set(cited)],
+        "relevant_cited_chunks": [cid for cid in cited if cid in set(relevant)],
+        "irrelevant_cited_chunks": [cid for cid in cited if cid not in set(relevant)],
+    }
+    if membership_valid is not None:
+        result["membership_valid"] = membership_valid
+    return result
+
+
 def evaluate_single(store: GraphStore, item: dict, hops: int = 3, k_baseline: int = 5) -> dict:
     """Evaluate a single question across hybrid GraphRAG and vector-only baseline."""
     q = item["question"]
@@ -178,6 +237,8 @@ def evaluate_single(store: GraphStore, item: dict, hops: int = 3, k_baseline: in
     primary_chunks = item.get("primary_chunks", [])
     contextual_chunks = item.get("contextual_chunks", [])
     all_gold_chunks = primary_chunks + contextual_chunks
+    expected_chunks = item.get("expected_evidence") or item.get("expected_chunks") or primary_chunks
+    relevant_chunks = item.get("relevant_evidence") or item.get("relevant_chunks") or all_gold_chunks
 
     # ---------------------------------------------------------
     # 1. Hybrid Retrieval & QA (with internal timing)
@@ -246,6 +307,17 @@ def evaluate_single(store: GraphStore, item: dict, hops: int = 3, k_baseline: in
         for cid in citations["cited_chunk_ids"]
     ]
 
+    # Evaluate evidence grounding (coverage of expected chunks, precision against relevant chunks)
+    cited_ids = citations.get("cited_chunk_ids", [])
+    evidence_grounding = evaluate_evidence_grounding(
+        cited_ids,
+        expected_chunks,
+        relevant_chunks,
+        membership_valid=citations.get("membership_valid")
+    )
+    citations["expected_coverage"] = evidence_grounding["expected_coverage"]
+    citations["relevance_precision"] = evidence_grounding["relevance_precision"]
+
     hybrid_result = {
         "answer": raw_answer,
         "contains": ans_contains,
@@ -253,6 +325,7 @@ def evaluate_single(store: GraphStore, item: dict, hops: int = 3, k_baseline: in
         "hypothesis_calibration": calib,
         "citations": citations,
         "citation_audit": citation_audit,
+        "evidence_grounding": evidence_grounding,
         "retrieved_chunk_ids": supplied_chunk_ids,
         "retrieval_metrics": hybrid_retrieval_metrics,
         "connectivity": connectivity_report,
@@ -322,6 +395,8 @@ def evaluate_single(store: GraphStore, item: dict, hops: int = 3, k_baseline: in
         "gold_entities": gold_entities,
         "primary_chunks": primary_chunks,
         "contextual_chunks": contextual_chunks,
+        "expected_evidence": expected_chunks,
+        "relevant_evidence": relevant_chunks,
         "hybrid": hybrid_result,
         "vector_baseline": baseline_result
     }
@@ -348,7 +423,9 @@ def run(path: str = "data/eval_questions.jsonl", output_dir: str = "artifacts",
         print(f"  Hybrid: Contains={h['contains']} | F1={h['f1']} | "
               f"Primary Recall={h['retrieval_metrics']['primary_recall']:.2f} | "
               f"Undirected Connected={h['connectivity']['undirected_connected']} | "
-              f"Citations Valid={h['citations']['membership_valid']} ({len(h['citations']['valid_chunk_ids'])} valid)")
+              f"Citations Valid={h['citations']['membership_valid']} ({len(h['citations']['valid_chunk_ids'])} valid) | "
+              f"Evidence Cov={h['evidence_grounding']['expected_coverage']:.2f} | "
+              f"Relevance Prec={h['evidence_grounding']['relevance_precision']:.2f}")
         print(f"  Vector (k={k_baseline}): Contains={b['contains']} | F1={b['f1']} | "
               f"Primary Recall={b['retrieval_metrics_std_k5']['primary_recall']:.2f}")
         print(f"  Latency: Hybrid Retrieval={h['latency']['retrieval_ms']}ms, Gen={h['latency']['generation_ms']}ms | "
@@ -366,6 +443,8 @@ def run(path: str = "data/eval_questions.jsonl", output_dir: str = "artifacts",
         "vector_primary_recall_avg": sum(r["vector_baseline"]["retrieval_metrics_std_k5"]["primary_recall"] for r in per_question_results) / n,
         "hybrid_path_connectivity_rate": sum(1 for r in per_question_results if r["hybrid"]["connectivity"]["undirected_connected"]) / n,
         "hybrid_citation_validity_rate": sum(1 for r in per_question_results if r["hybrid"]["citations"]["membership_valid"]) / n,
+        "hybrid_expected_evidence_coverage_avg": sum(r["hybrid"]["evidence_grounding"]["expected_coverage"] for r in per_question_results) / n,
+        "hybrid_citation_relevance_precision_avg": sum(r["hybrid"]["evidence_grounding"]["relevance_precision"] for r in per_question_results) / n,
         "hybrid_avg_retrieval_ms": sum(r["hybrid"]["latency"]["retrieval_ms"] for r in per_question_results) / n,
         "hybrid_avg_generation_ms": sum(r["hybrid"]["latency"]["generation_ms"] for r in per_question_results) / n,
     }
@@ -381,7 +460,8 @@ def run(path: str = "data/eval_questions.jsonl", output_dir: str = "artifacts",
             "hops": hops,
             "k_baseline": k_baseline,
             "precision_k_denominator": "k_budget (fixed budget slots)",
-            "citation_validation_type": "chunk_id_format_and_membership (syntactic presence only)"
+            "citation_validation_type": "chunk_id_format_and_membership (syntactic presence only)",
+            "evidence_grounding_metrics": "expected_evidence_coverage and citation_relevance_precision"
         },
         "aggregate": agg,
         "questions": per_question_results
@@ -398,6 +478,8 @@ def run(path: str = "data/eval_questions.jsonl", output_dir: str = "artifacts",
     print(f"  Vector Primary Chunk Recall: {agg['vector_primary_recall_avg'] * 100:.1f}%")
     print(f"  Path Connectivity Rate:      {agg['hybrid_path_connectivity_rate'] * 100:.1f}%")
     print(f"  Citation Validity Rate:      {agg['hybrid_citation_validity_rate'] * 100:.1f}%")
+    print(f"  Expected Evidence Coverage:  {agg['hybrid_expected_evidence_coverage_avg'] * 100:.1f}%")
+    print(f"  Citation Relevance Prec:     {agg['hybrid_citation_relevance_precision_avg'] * 100:.1f}%")
     print(f"  Avg Hybrid Retrieval Time:   {agg['hybrid_avg_retrieval_ms']:.1f} ms")
     print(f"  Avg Hybrid Generation Time:  {agg['hybrid_avg_generation_ms'] / 1000:.1f} s")
     print(f"Structured report saved to: {report_file}")
