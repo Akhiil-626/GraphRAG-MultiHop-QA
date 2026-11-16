@@ -1,8 +1,10 @@
 import inspect
+import re
 from unittest.mock import MagicMock
 from app.retrieve import retrieve
 from app.qa import validate_citations, GRAPH_PROMPT, baseline_answer
 from app.graph_store import GraphStore
+from app.evaluate import contains, expected_evidence_coverage, citation_relevance_precision, evaluate_evidence_grounding
 
 
 def test_default_retrieval_hops():
@@ -288,3 +290,125 @@ def test_qa_answer_retries_when_citations_missing(monkeypatch):
     assert res["citations"]["membership_valid"] is True
     assert res["citations"]["valid_chunk_ids"] == ["ENG-1-0"]
     assert res["answer"] == responses[1]
+
+
+def test_graph_prompt_no_placeholder_chunk_ids():
+    """Verify that GRAPH_PROMPT contains no placeholder chunk tokens (e.g. CHUNK-) that could leak."""
+    assert "chunk-" not in GRAPH_PROMPT.lower()
+    assert "EXAMPLES OF REQUIRED FORMAT:" in GRAPH_PROMPT
+
+
+def test_graph_prompt_contains_evidence_linking_and_single_hop_rules():
+    """Verify GRAPH_PROMPT contains rules for prose, complaint-to-release linking, single-hop guard, and anti-padding."""
+    # Rule 1: Natural-language prose & anti-citation-only rule
+    assert "natural-language prose" in GRAPH_PROMPT
+    assert "never respond with chunk IDs alone, and never output a list of citations in place of an answer" in GRAPH_PROMPT
+
+    # Rule 9: Multi-hop causal completion rule
+    assert "When answering multi-hop causal questions asking why an issue occurred, trace the full causal path across retrieved chunks" in GRAPH_PROMPT
+    assert "explicitly identify the release that modified that gateway" in GRAPH_PROMPT
+
+    # Rule 10: Targeted complaint-to-release evidence linking
+    assert "When a question asks which release changed the gateway used by a specific complaint, cite both the complaint chunk establishing which gateway was used and the release chunk establishing the change." in GRAPH_PROMPT
+    assert "Do not cite unrelated failure or timeout chunks that are not asked about." in GRAPH_PROMPT
+
+    # Rule 11: Single-hop guard
+    assert "When a single-hop question asks only which gateway or entity is affected by a specific failure, cite only the chunk directly establishing that fact." in GRAPH_PROMPT
+    assert "Do not add release, complaint, or subsequent engineering chunks." in GRAPH_PROMPT
+
+    # Rule 12: Anti-padding rule
+    assert "Do not cite unrelated retrieved chunks or add citations merely to increase citation count." in GRAPH_PROMPT
+
+
+def test_q1_multihop_evidence_completeness_regression():
+    """Regression test for Q1 multi-hop evidence completeness across complementary chunks."""
+    expected = ["ENG-1-0", "ENG-2-0"]
+    relevant = ["ENG-1-0", "ENG-2-0", "C-001-0", "C-002-0", "C-005-0"]
+    supplied = ["C-001-0", "C-002-0", "C-003-0", "C-005-0", "ENG-1-0", "ENG-2-0"]
+
+    # 1. Complete multi-hop answer linking both causal and release chunks
+    full_answer = (
+        "Answer: Bank A customers are experiencing duplicate debits due to callback timeouts "
+        "affecting Gateway X [ENG-1-0], which had its retry logic modified in Release 4.2 [ENG-2-0].\n"
+        "Evidence: [ENG-1-0], [ENG-2-0]"
+    )
+    val = validate_citations(full_answer, supplied)
+    assert val["membership_valid"] is True
+    assert set(val["cited_chunk_ids"]) == {"ENG-1-0", "ENG-2-0"}
+
+    grounding = evaluate_evidence_grounding(val["cited_chunk_ids"], expected, relevant, membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert grounding["uncovered_expected_chunks"] == []
+    assert contains(full_answer, "release 4.2") is True
+
+    # 2. Incomplete answer missing the release evidence
+    partial_answer = (
+        "Answer: Bank A duplicate debits are caused by callback timeouts on Gateway X [ENG-1-0].\n"
+        "Evidence: [ENG-1-0]"
+    )
+    partial_val = validate_citations(partial_answer, supplied)
+    partial_grounding = evaluate_evidence_grounding(partial_val["cited_chunk_ids"], expected, relevant, membership_valid=True)
+    assert partial_grounding["expected_coverage"] == 0.5
+    assert partial_grounding["uncovered_expected_chunks"] == ["ENG-2-0"]
+
+
+def test_q2_complaint_to_engineering_linking_regression():
+    """Regression test for Q2 complaint-to-engineering evidence linking."""
+    expected = ["C-003-0", "ENG-2-0"]
+    relevant = ["C-003-0", "ENG-2-0"]
+    supplied = ["C-003-0", "C-005-0", "ENG-1-0", "ENG-2-0"]
+
+    # 1. Well-linked answer citing both complaint record and engineering release
+    linked_answer = (
+        "Answer: Bank B complaints involved Gateway X [C-003-0], whose retry logic was modified "
+        "in Release 4.2 [ENG-2-0].\n"
+        "Evidence: [C-003-0], [ENG-2-0]"
+    )
+    val = validate_citations(linked_answer, supplied)
+    assert val["membership_valid"] is True
+    grounding = evaluate_evidence_grounding(val["cited_chunk_ids"], expected, relevant, membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert contains(linked_answer, "release 4.2") is True
+
+    # 2. Degenerate citation-only output without prose is detected
+    citation_only = "Answer: [C-003-0], [ENG-2-0]\nEvidence: [C-003-0], [ENG-2-0]"
+    ans_line = citation_only.split("\n")[0].replace("Answer:", "").strip()
+    prose_only = re.sub(r"\[[A-Za-z0-9_.-]+\]", "", ans_line).strip()
+    assert len(prose_only) < 5  # Confirms detection of degenerate citation-only output
+
+
+def test_q3_single_hop_citation_precision_regression():
+    """Regression test for Q3 single-hop citation precision preventing irrelevant evidence padding."""
+    expected = ["ENG-1-0"]
+    relevant = ["ENG-1-0"]
+    supplied = ["C-001-0", "C-003-0", "ENG-1-0", "ENG-2-0"]
+
+    # 1. Targeted single-hop answer adhering to single-hop guard
+    targeted_answer = (
+        "Answer: Gateway X is affected by the callback timeout failure [ENG-1-0].\n"
+        "Evidence: [ENG-1-0]"
+    )
+    val = validate_citations(targeted_answer, supplied)
+    assert val["membership_valid"] is True
+    assert val["cited_chunk_ids"] == ["ENG-1-0"]
+
+    grounding = evaluate_evidence_grounding(val["cited_chunk_ids"], expected, relevant, membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert grounding["irrelevant_cited_chunks"] == []
+    assert contains(targeted_answer, "gateway x") is True
+
+    # 2. Padded answer that inappropriately drags in complaint and release chunks
+    padded_answer = (
+        "Answer: Gateway X is affected by callback timeouts [ENG-1-0], which was updated in "
+        "Release 4.2 [ENG-2-0] following Bank B complaints [C-003-0].\n"
+        "Evidence: [ENG-1-0], [ENG-2-0], [C-003-0]"
+    )
+    padded_val = validate_citations(padded_answer, supplied)
+    padded_grounding = evaluate_evidence_grounding(padded_val["cited_chunk_ids"], expected, relevant, membership_valid=True)
+    assert padded_grounding["expected_coverage"] == 1.0
+    # Relevance precision is penalized because ENG-2-0 and C-003-0 are irrelevant to Q3
+    assert padded_grounding["relevance_precision"] == round(1 / 3, 4)
+    assert set(padded_grounding["irrelevant_cited_chunks"]) == {"ENG-2-0", "C-003-0"}

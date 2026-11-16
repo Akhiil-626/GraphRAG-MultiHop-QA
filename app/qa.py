@@ -4,27 +4,30 @@ from app.graph_store import GraphStore
 from app.retrieve import retrieve
 
 GRAPH_PROMPT = """Answer the question using ONLY the provided evidence. Follow these rules:
-1. Answer the question directly in the first sentence. Keep the answer concise and avoid unnecessary background.
+1. Answer the question directly in the first sentence in natural-language prose. Keep the answer concise and avoid unnecessary background, but state all necessary facts from the evidence. Every answer must contain a meaningful natural-language explanation before its citations; never respond with chunk IDs alone, and never output a list of citations in place of an answer.
 2. Base factual claims strictly on the text in SOURCE CHUNKS. Every factual claim derived from a source chunk must cite its exact chunk ID in square brackets, e.g. [ENG-1-0]. Every non-empty answer must include at least one valid chunk citation.
-3. Never cite chunk IDs in parentheses. Never omit square brackets around chunk IDs.
+3. Never cite chunk IDs in parentheses. Never omit square brackets around chunk IDs. Always enclose each chunk ID in its own square brackets.
 4. Only cite chunk IDs actually provided in the retrieved evidence (SOURCE CHUNKS). Never invent or fabricate chunk IDs.
 5. Never put graph relationship names (such as AFFECTS, VIA, REPORTS, or CAUSED_BY) in square brackets. Write relationship names as plain text.
 6. Do not contradict evidence. If a source explicitly identifies a release or gateway, state it directly rather than claiming it is unspecified.
 7. Treat GRAPH FACTS as structural pathways and hypotheses of co-occurrence, not definitive proof of causation. Multi-hop connections must be framed as hypotheses unless the source text explicitly asserts a direct causal link. Distinguish explicit evidence from hypotheses; do not present a possible explanation as an established root cause.
 8. If evidence does not establish the complete answer, state exactly what is known and what remains uncertain or unverified.
-9. When answering multi-hop questions, combine complementary facts across retrieved chunks to trace the full causal or relational path. Do not stop at an intermediate entity or mechanism when the question asks for the broader cause or related release; connect it to any subsequent release or change identified in the evidence, citing each factual claim with its supplied chunk ID in square brackets.
-10. Format your response using this exact structure:
-Answer: <direct answer citing source chunk IDs in square brackets, e.g. [ENG-1-0]>
-Evidence: <one or more exact chunk IDs from the provided evidence, e.g. [ENG-1-0]>
+9. When answering multi-hop causal questions asking why an issue occurred, trace the full causal path across retrieved chunks: state the technical cause affecting the gateway, and explicitly identify the release that modified that gateway, citing each factual claim with its supplied chunk ID in square brackets.
+10. When a question asks which release changed the gateway used by a specific complaint, cite both the complaint chunk establishing which gateway was used and the release chunk establishing the change. Do not cite unrelated failure or timeout chunks that are not asked about.
+11. When a single-hop question asks only which gateway or entity is affected by a specific failure, cite only the chunk directly establishing that fact. Do not add release, complaint, or subsequent engineering chunks.
+12. Include only evidence relevant to answering the question. Do not cite unrelated retrieved chunks or add citations merely to increase citation count.
+13. Format your response using this exact structure:
+Answer: <direct answer in natural-language prose citing source chunk IDs in square brackets>
+Evidence: <one or more exact chunk IDs from the provided evidence in square brackets>
 
 EXAMPLES OF REQUIRED FORMAT:
 Example 1:
-Answer: Service Alpha complaints report duplicate debits [C-001-0]. Engineering evidence attributes duplicate debits to callback timeout, which affects Gateway Alpha [ENG-1-0]. Release Alpha changed Gateway Alpha's retry logic [ENG-2-0], but the evidence does not establish that this change caused the incidents.
+Answer: Service complaints report duplicate debits [C-001-0]. Engineering evidence attributes duplicate debits to callback timeout, which affects Gateway Alpha [ENG-1-0]. Release Alpha changed Gateway Alpha retry logic [ENG-2-0], but the evidence does not establish that this change caused the incidents.
 Evidence: [C-001-0], [ENG-1-0], [ENG-2-0]
 
 Example 2:
-Answer: Release Alpha changed Gateway Alpha's retry logic [ENG-2-0]. The Service Beta complaint involved Gateway Alpha [C-003-0].
-Evidence: [ENG-2-0], [C-003-0]
+Answer: The Service complaint involved Gateway Alpha [C-003-0]. Release Alpha changed Gateway Alpha retry logic [ENG-2-0].
+Evidence: [C-003-0], [ENG-2-0]
 
 Example 3:
 Answer: Gateway Alpha is affected by callback timeout [ENG-1-0].
