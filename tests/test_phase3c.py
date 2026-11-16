@@ -304,13 +304,18 @@ def test_graph_prompt_contains_evidence_linking_and_single_hop_rules():
     assert "natural-language prose" in GRAPH_PROMPT
     assert "never respond with chunk IDs alone, and never output a list of citations in place of an answer" in GRAPH_PROMPT
 
+    # Rule 5: Prose relationships without literal graph syntax
+    assert "Express every relationship in ordinary natural-language prose." in GRAPH_PROMPT
+    assert "Describe how entities are related using clear English sentences." in GRAPH_PROMPT
+    assert "Do not reproduce internal graph representations." in GRAPH_PROMPT
+
     # Rule 9: Multi-hop causal completion rule
     assert "When answering multi-hop causal questions asking why an issue occurred, trace the full causal path across retrieved chunks" in GRAPH_PROMPT
     assert "explicitly identify the release that modified that gateway" in GRAPH_PROMPT
 
     # Rule 10: Targeted complaint-to-release evidence linking
-    assert "When a question asks which release changed the gateway used by a specific complaint, cite both the complaint chunk establishing which gateway was used and the release chunk establishing the change." in GRAPH_PROMPT
-    assert "Do not cite unrelated failure or timeout chunks that are not asked about." in GRAPH_PROMPT
+    assert "When a question asks which release changed the gateway used by a specific complaint, cite only the complaint chunk establishing which gateway was used and the release chunk establishing the change." in GRAPH_PROMPT
+    assert "Do not cite failure, timeout, or other engineering chunks." in GRAPH_PROMPT
 
     # Rule 11: Single-hop guard
     assert "When a single-hop question asks only which gateway or entity is affected by a specific failure, cite only the chunk directly establishing that fact." in GRAPH_PROMPT
@@ -412,3 +417,199 @@ def test_q3_single_hop_citation_precision_regression():
     # Relevance precision is penalized because ENG-2-0 and C-003-0 are irrelevant to Q3
     assert padded_grounding["relevance_precision"] == round(1 / 3, 4)
     assert set(padded_grounding["irrelevant_cited_chunks"]) == {"ENG-2-0", "C-003-0"}
+
+
+def test_generated_answers_must_not_contain_raw_graph_arrow_syntax(monkeypatch):
+    """Verify that generated answers through qa.answer do not contain raw graph arrow syntax like -[REL]->."""
+    from app import llm, qa
+
+    mock_store = MagicMock()
+    mock_retrieval = {
+        "seeds": ["Bank:bank b"],
+        "facts": [
+            {"s": "c-003", "rel": "VIA", "o": "gateway x", "chunks": ["C-003-0"]},
+            {"s": "gateway x", "rel": "CHANGED_IN", "o": "release 4.2", "chunks": ["ENG-2-0"]},
+        ],
+        "chunks": [
+            {"id": "C-003-0", "text": "Customer of Bank B paid via Gateway X."},
+            {"id": "ENG-2-0", "text": "Gateway X was changed in Release 4.2."},
+        ],
+        "graph_chunk_ids": ["C-003-0", "ENG-2-0"],
+        "vector_chunk_ids": [],
+    }
+    monkeypatch.setattr(qa, "retrieve", lambda store, q, **kw: mock_retrieval)
+
+    # 1. Clean response without graph arrows
+    clean_response = (
+        "Answer: Release 4.2 changed Gateway X, which was used by Bank B complaints [C-003-0], "
+        "citing that Gateway X was changed in Release 4.2 [ENG-2-0].\n"
+        "Evidence: [C-003-0], [ENG-2-0]"
+    )
+    monkeypatch.setattr(llm, "chat", lambda prompt: clean_response)
+
+    res = qa.answer(mock_store, "Which release changed the gateway used by Bank B complaints?")
+    assert re.search(r"-\[?[A-Z_]+\]?->", res["answer"]) is None
+    assert res["citations"]["membership_valid"] is True
+
+    # 2. Defective response containing raw graph arrow syntax is detected by pattern
+    defective_response = (
+        "Answer: Release 4.2 changed Gateway X, which was used by Bank B complaints [C-003-0], "
+        "citing Gateway X -[CHANGED_IN]-> release 4.2 [ENG-2-0] and Gateway X -[ABOUT]-> Gateway X [ENG-1-0].\n"
+        "Evidence: [C-003-0], [ENG-2-0], [ENG-1-0]"
+    )
+    arrow_matches = re.findall(r"-\[[A-Z_]+\]->", defective_response)
+    assert arrow_matches == ["-[CHANGED_IN]->", "-[ABOUT]->"]
+    assert re.search(r"-\[?[A-Z_]+\]?->", defective_response) is not None
+
+
+def test_q2_cites_exact_complaint_and_release_excluding_failure_chunk(monkeypatch):
+    """Verify that Q2 answer pipeline cites exactly C-003-0 and ENG-2-0, excluding ENG-1-0."""
+    from app import llm, qa
+
+    mock_store = MagicMock()
+    mock_retrieval = {
+        "seeds": ["Bank:bank b", "Gateway:gateway x"],
+        "facts": [
+            {"s": "c-003", "rel": "VIA", "o": "gateway x", "chunks": ["C-003-0"]},
+            {"s": "gateway x", "rel": "CHANGED_IN", "o": "release 4.2", "chunks": ["ENG-2-0"]},
+            {"s": "callback timeout", "rel": "AFFECTS", "o": "gateway x", "chunks": ["ENG-1-0"]},
+        ],
+        "chunks": [
+            {"id": "C-003-0", "text": "Customer of Bank B paid by card via Gateway X."},
+            {"id": "ENG-2-0", "text": "Gateway X was changed in Release 4.2."},
+            {"id": "ENG-1-0", "text": "Callback timeout affects Gateway X."},
+        ],
+        "graph_chunk_ids": ["C-003-0", "ENG-2-0", "ENG-1-0"],
+        "vector_chunk_ids": [],
+    }
+    monkeypatch.setattr(qa, "retrieve", lambda store, q, **kw: mock_retrieval)
+
+    # Clean Q2 answer citing exactly C-003-0 and ENG-2-0
+    q2_answer = (
+        "Answer: Release 4.2 changed Gateway X, which was used by Bank B complaints [C-003-0], "
+        "citing that Gateway X was changed in Release 4.2 [ENG-2-0].\n"
+        "Evidence: [C-003-0], [ENG-2-0]"
+    )
+    monkeypatch.setattr(llm, "chat", lambda prompt: q2_answer)
+
+    res = qa.answer(mock_store, "Which release changed the gateway used by Bank B complaints?")
+    cited = res["citations"]["cited_chunk_ids"]
+
+    # Verify exact citations: C-003-0 and ENG-2-0 only
+    assert set(cited) == {"C-003-0", "ENG-2-0"}
+    assert "ENG-1-0" not in cited
+
+    # Verify evidence grounding
+    grounding = evaluate_evidence_grounding(cited, ["C-003-0", "ENG-2-0"], ["C-003-0", "ENG-2-0"], membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert grounding["irrelevant_cited_chunks"] == []
+    assert re.search(r"-\[?[A-Z_]+\]?->", res["answer"]) is None
+
+
+def test_q1_retains_both_causal_evidence_chunks(monkeypatch):
+    """Verify that Q1 answer pipeline retains both causal evidence chunks ENG-1-0 and ENG-2-0."""
+    from app import llm, qa
+
+    mock_store = MagicMock()
+    mock_retrieval = {
+        "seeds": ["Failure:duplicate debit", "Bank:bank a"],
+        "facts": [
+            {"s": "duplicate debit", "rel": "CAUSED_BY", "o": "callback timeout", "chunks": ["ENG-1-0"]},
+            {"s": "callback timeout", "rel": "AFFECTS", "o": "gateway x", "chunks": ["ENG-1-0"]},
+            {"s": "gateway x", "rel": "CHANGED_IN", "o": "release 4.2", "chunks": ["ENG-2-0"]},
+        ],
+        "chunks": [
+            {"id": "ENG-1-0", "text": "Duplicate debit is caused by callback timeout affecting Gateway X."},
+            {"id": "ENG-2-0", "text": "Gateway X was changed in Release 4.2, modifying retry logic."},
+        ],
+        "graph_chunk_ids": ["ENG-1-0", "ENG-2-0"],
+        "vector_chunk_ids": [],
+    }
+    monkeypatch.setattr(qa, "retrieve", lambda store, q, **kw: mock_retrieval)
+
+    q1_answer = (
+        "Answer: Bank A customers are seeing duplicate debits because callback timeout affects Gateway X [ENG-1-0], "
+        "and Gateway X was changed in Release 4.2 [ENG-2-0], which modified its retry logic.\n"
+        "Evidence: [ENG-1-0], [ENG-2-0]"
+    )
+    monkeypatch.setattr(llm, "chat", lambda prompt: q1_answer)
+
+    res = qa.answer(mock_store, "Why are Bank A customers seeing duplicate debits?")
+    cited = res["citations"]["cited_chunk_ids"]
+
+    assert set(cited) == {"ENG-1-0", "ENG-2-0"}
+    assert res["citations"]["membership_valid"] is True
+
+    grounding = evaluate_evidence_grounding(
+        cited,
+        ["ENG-1-0", "ENG-2-0"],
+        ["ENG-1-0", "ENG-2-0", "C-001-0", "C-002-0", "C-005-0"],
+        membership_valid=True
+    )
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert contains(res["answer"], "release 4.2") is True
+    assert re.search(r"-\[?[A-Z_]+\]?->", res["answer"]) is None
+
+
+def test_q3_retains_only_callback_timeout_chunk(monkeypatch):
+    """Verify that Q3 answer pipeline retains only callback timeout chunk ENG-1-0."""
+    from app import llm, qa
+
+    mock_store = MagicMock()
+    mock_retrieval = {
+        "seeds": ["Failure:callback timeout", "Gateway:gateway x"],
+        "facts": [
+            {"s": "callback timeout", "rel": "AFFECTS", "o": "gateway x", "chunks": ["ENG-1-0"]},
+            {"s": "gateway x", "rel": "CHANGED_IN", "o": "release 4.2", "chunks": ["ENG-2-0"]},
+        ],
+        "chunks": [
+            {"id": "ENG-1-0", "text": "Duplicate debit is caused by callback timeout affecting Gateway X."},
+            {"id": "ENG-2-0", "text": "Gateway X was changed in Release 4.2."},
+        ],
+        "graph_chunk_ids": ["ENG-1-0", "ENG-2-0"],
+        "vector_chunk_ids": [],
+    }
+    monkeypatch.setattr(qa, "retrieve", lambda store, q, **kw: mock_retrieval)
+
+    q3_answer = (
+        "Answer: Gateway X is affected by callback timeout [ENG-1-0].\n"
+        "Evidence: [ENG-1-0]"
+    )
+    monkeypatch.setattr(llm, "chat", lambda prompt: q3_answer)
+
+    res = qa.answer(mock_store, "Which gateway is affected by the callback timeout failure?")
+    cited = res["citations"]["cited_chunk_ids"]
+
+    assert cited == ["ENG-1-0"]
+    assert res["citations"]["membership_valid"] is True
+
+    grounding = evaluate_evidence_grounding(cited, ["ENG-1-0"], ["ENG-1-0"], membership_valid=True)
+    assert grounding["expected_coverage"] == 1.0
+    assert grounding["relevance_precision"] == 1.0
+    assert grounding["irrelevant_cited_chunks"] == []
+    assert contains(res["answer"], "gateway x") is True
+    assert re.search(r"-\[?[A-Z_]+\]?->", res["answer"]) is None
+
+
+def test_rule5_contains_no_literal_graph_syntax_examples():
+    """Verify Rule 5 contains no literal graph relationship names, arrows, or forbidden syntax examples."""
+    rule5_match = re.search(r"5\.\s*([^\n]+)", GRAPH_PROMPT)
+    assert rule5_match is not None
+    rule5_text = rule5_match.group(1)
+
+    # Must contain natural language instructions
+    assert "ordinary natural-language prose" in rule5_text
+    assert "clear English sentences" in rule5_text
+    assert "internal graph representations" in rule5_text
+
+    # Must NOT contain arrow syntax
+    assert "->" not in rule5_text
+    assert "<-" not in rule5_text
+    assert "-[" not in rule5_text
+    assert "]->" not in rule5_text
+
+    # Must NOT contain literal relationship names that could prime generation
+    for rel_name in ["CHANGED_IN", "AFFECTS", "REPORTS", "CAUSED_BY", "VIA", "DEPLOYED_ON", "ABOUT", "AGAINST"]:
+        assert rel_name not in rule5_text
